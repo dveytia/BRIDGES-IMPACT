@@ -1,0 +1,374 @@
+---
+title: "BRIDGES-IMPACT: Explore bibliographic metadata"
+knit: (function(input_file, encoding) {
+    out_dir <- 'knitted-docs';
+    rmarkdown::render(input_file,
+      encoding=encoding,
+      output_file=file.path(dirname(input_file), out_dir, '2025-05-19_explore-bibliographic-metadata'))})
+author: "Devi Veytia"
+date: "2025-05-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message=FALSE)
+
+library(revtools)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(here)
+library(readxl)
+library(stringi)
+library(stringr)
+library(quanteda)
+library(textstem)
+library(knitr)
+```
+
+# Overview
+
+Key questions:
+- the key words used (and how they evolved over time)
+- publishing country (or first auttors country) - 
+-articles per year/ the publishing year
+- (articles on marine SES)
+- maybe the document type
+
+
+
+
+```{r read in deduplicated references, eval = FALSE}
+# Import the bibliographic metadata
+refs <- revtools::read_bibliography(
+  here::here("data/raw-data/SearchString_7_without duplicates_24042025.ris")
+)
+
+# Join metadata with the sysrev answers
+# Need to use fuzzy join to account for encoding errors when reading in data
+screenAns <- readxl::read_excel(
+  here::here("data/raw-data/BridgesImpactReview_P224275_0519_A353.xlsx"),
+  sheet = "Article Answers") %>%
+  filter(Status != "conflict") %>%
+  mutate(Include = as.logical(toupper(Include)),
+         title = tm::removePunctuation(tolower(Title))) %>%
+  fuzzyjoin::stringdist_left_join(
+    refs %>%
+      mutate(
+        title = tm::removePunctuation(tolower(title))
+      ), 
+    by = c("title" = "title"),
+    max_dist = 15, method = "osa", ignore_case=TRUE, distance_col = "stringDist"
+  )
+
+sum(is.na(screenAns$title.y)) # Check this = 0 , means all the articles are matched.
+
+# if there are any dups from join, extract the most complete reference
+if(sum(duplicated(screenAns$`Article ID`)) > 0){ 
+  screenAns <- revtools::extract_unique_references(screenAns, screenAns$`Article ID`)
+}
+
+# View data
+screenAns %>%
+  select(`Article ID`, Include, title.x, title.y, stringDist, year, doi, journal) %>%
+  View
+
+screenAns <- screenAns %>% dplyr::select(-c(`title.x`, `title.y`, n_duplicates))
+# Save matched data frame
+save(screenAns, 
+     file = here::here("data/derived-data/screenAnswersWithBibMetadata.RData"))
+
+rm(refs)
+```
+
+# Plots of bibliometric data
+
+note I was not able to produce a map of affiliation countries. Unfortunately this was not possible because the 'Affiliation' metadata was not exported in the .ris file. See available columns below:
+```{r Map of affiliation countries}
+load(here::here("data/derived-data/screenAnswersWithBibMetadata.RData"))
+print(colnames(screenAns))
+
+```
+
+
+
+```{r Document types by publishing year}
+load(here::here("data/derived-data/screenAnswersWithBibMetadata.RData"))
+
+screenAns %>%
+  mutate(
+    document_type = factor(type, levels = c("JOUR","CHAP","BOOK"), labels = c("Journal article","Chapter","Book")),
+    Date = as.Date(paste0(year,"-01-01"))
+  ) %>%
+  ggplot(aes(x=Date, fill=document_type))+
+  ggtitle("Document types by publishing year")+
+  geom_bar()+
+  labs(y="N Publications Included")+
+  scale_x_date(name = "Publication Year")+
+  scale_fill_brewer(type="qual", name = "Document type")+
+  theme_bw()
+```
+
+# Topic keywords evolving over time
+
+
+*Explanation of topic models from [revtools documentation](https://www.biorxiv.org/content/10.1101/262881v2.full.pdf)**
+
+Uses: Helpful for gaining an a priori impression of the dominant themes within search results. 
+Limitations: Cannot define the topics a priori (although the number of topics sought can be specified) -- groupings are a function of the data.
+
+
+
+```{r run revtools topic model, eval=FALSE}
+require(revtools)
+
+# Load article data
+load(here::here("data/derived-data/screenAnswersWithBibMetadata.RData"))
+
+## get vector of stopwords
+# my_stopwords <- readr::read_lines(
+#   normalizePath(file.path(scopeSearchDir, "my_stopwords.txt"))) # can also read in my own stopwords in I want
+all_stopwords <- revtools::revwords()
+
+
+
+# screen topic models
+# Included title and Keywords
+# selected 5 topics to calculate
+# 4,000 iterations
+screenTopicsResult <- screen_topics(
+  as.data.frame(screenAns) %>%
+    dplyr::select(Title, keywords, year),
+  remove_words = all_stopwords
+)
+
+# save
+save(screenTopicsResult, file=here::here("data/derived-data/revtoolsTopicModelResult.RData"))
+
+
+```
+
+
+Plot of the ordination of the topic classifications from the topic model. Each point represents one article, with points colored according to the highest-weighted topic for that article. When you hover your mouse over a point, you can see the title of the article, and the topic classification.
+
+```{r plot plotly scatterplot of topic model}
+
+load(here::here("data/derived-data/revtoolsTopicModelResult.RData"))
+
+scatter3dPlot <- plot_ly(screenTopicsResult$plot_ready$x, x=~Axis1, y=~Axis2, z=~Axis3, color = ~factor(topic), type="scatter3d", text =~caption, hoverinfo="text", size=15) 
+scatter3dPlot
+
+```
+
+The bar chart shows the number of articles within each topic. Hovering the mouse over a bar will show the keywords that define each topic.
+
+```{r plot the barplot of topic categories to fit}
+
+barPlotly <- plot_ly(screenTopicsResult$plot_ready$topic, x=~topic, y=~n, color=~factor(topic), text=~caption_full, hoverinfo="text", type="bar") 
+barPlotly
+```
+
+```{r plot the barplot of topic categories to fit over time}
+
+topicsByYear <- screenTopicsResult$raw %>%
+  left_join(screenTopicsResult$plot_ready$topic, by = "topic") %>%
+  mutate(
+    year= as.numeric(year),
+    topic = as.factor(topic)
+  )%>%
+  ggplot(aes(x=year, fill = topic))+
+  geom_bar()+
+  labs(y = "N Publications Included", x = "Year", title = "Topic Keywords By Year")+
+  scale_fill_brewer(
+    name = "Topic Keywords",
+    palette = "Set2",
+    breaks = as.factor(screenTopicsResult$plot_ready$topic$topic),
+    labels = screenTopicsResult$plot_ready$topic$caption
+    )+
+  guides(fill = guide_legend(nrow = 5))+
+  theme_minimal()+
+  theme(
+    legend.position = "bottom"
+  )
+
+topicsByYear
+
+```
+
+
+```{r plot the barplot of proportion topic categories to fit over time}
+
+annualTotals <- screenTopicsResult$raw %>%
+  mutate(
+    year= as.numeric(year)
+  ) %>%
+  group_by(year)%>%
+  summarise(
+    annualTotal = n()
+  )
+
+topicsProportionByYear <- screenTopicsResult$raw %>%
+  left_join(screenTopicsResult$plot_ready$topic, by = "topic") %>%
+  mutate(
+    year= as.numeric(year),
+    topic = as.factor(topic)
+  )%>%
+  group_by(year, topic) %>%
+  summarise(
+    n = n()
+  )%>%
+  left_join(annualTotals, by="year") %>%
+  mutate(
+    proportion= n/annualTotal
+  )%>%
+  ggplot(aes(x=year, y=proportion, fill = topic))+
+  geom_col(position = "stack")+
+  labs(y = "N Publications Included", x = "Year", title = "Topic Keywords Proportion By Year")+
+  scale_fill_brewer(
+    name = "Topic Keywords",
+    palette = "Set2",
+    breaks = as.factor(screenTopicsResult$plot_ready$topic$topic),
+    labels = screenTopicsResult$plot_ready$topic$caption
+    )+
+  guides(fill = guide_legend(nrow = 5))+
+  theme_minimal()+
+  theme(
+    legend.position = "bottom"
+  )
+topicsProportionByYear
+```
+
+
+You can see the difficulty with the topic model approach -- is there really a meaningful difference in the concepts embodied by the different topics? I can't really see anything but maybe to a more trained eye this may mean something. 
+
+# Articles on marine SES
+
+
+There are many ways you could try to identify articles relevant for marine SES. Here I just experimented with a keyword matching search
+
+
+
+```{r Calculate keyword matching}
+# source functions
+functionsToSource <- dir(here::here("R"))
+for(i in 1:length(functionsToSource)){
+  source(here::here("R", functionsToSource[i]))
+}
+
+# Load text data
+load(here::here("data/derived-data/screenAnswersWithBibMetadata.RData"))
+
+
+# Process text for matching
+# group title, abstract and keywords together
+nlptxt <- screenAns %>%
+  mutate(id = `Article ID`, text = paste(Title, abstract, keywords))%>%
+  select(id, Title, abstract, keywords, text)
+
+
+
+# Lemmitization and clean string to remove extra spaces, numbers and punctuation
+nlptxt$text <- clean_string(nlptxt$text)
+nlptxt$text <- textstem::lemmatize_strings(nlptxt$text)
+
+
+
+```
+
+
+First I assembled a list of keywords grouped by different descriptive factors we would like to extract information about. We then scanned the article title, abstract and keywords and counted the occurrences of matches to these terms (boolean response of "yes" for at least one match/article).
+
+```{r process grouped search terms, echo=FALSE}
+## Read in files
+nlp_search_terms <- read.csv(here::here("data/derived-data/marineSES-keywords-match.csv"))
+nlp_search_terms <- subset(nlp_search_terms,nlp_search_terms$Term != "")
+
+# lemmitize the search terms
+nlp_search_terms$Term <- textstem::lemmatize_words(nlp_search_terms$Term)
+
+# remove punctuation and extra spaces
+nlp_search_terms$Term <- clean_string(nlp_search_terms$Term)
+
+# remove any resulting duplicates
+nlp_search_terms <- nlp_search_terms[!duplicated(nlp_search_terms$Term),]
+
+
+# separate out into single terms and expressions
+single_words <- nlp_search_terms$Term[which(nlp_search_terms$Term.type == "single")]
+expressions <- nlp_search_terms$Term[which(nlp_search_terms$Term.type == "expression")]
+
+# name them by their corresponding group
+names(single_words) <- nlp_search_terms$Group.name[which(nlp_search_terms$Term.type == "single")]
+names(expressions) <- nlp_search_terms$Group.name[which(nlp_search_terms$Term.type == "expression")]
+
+
+# Print out the table to view
+
+knitr::kable(nlp_search_terms, caption = "Terms to be used for preliminary NLP coding")
+
+```
+
+
+
+We then constructed a document feature matrix of all the terms (a type of feature) * the articles where occurrences were found. To calculate when terms occurred together in the same document, we constructed a feature co-occurrence matrix with dimensions V*V where V=the number of terms (features)
+
+```{r screen for matches to make a document feature matrix}
+## This chunk takes a while to run, so save results and load later
+# each row is a document, and each column corresponds to a word match
+
+screens_swd <- screen(nlptxt$text, single_words)
+screens_expr <- screen(nlptxt$text, expressions)
+
+
+# create a document feature matrix
+# cbind results together
+my_screens <- cbind(screens_swd, screens_expr)
+rownames(my_screens) <- nlptxt$id
+rm(screens_swd, screens_expr)
+
+# make this into a document feature matrix
+my_dfm <- as.dfm(my_screens)
+
+
+
+# calculate the feature co-occurrent matrix
+# with dimensions = V*V, where V= # of features/terms
+my_fcm <- quanteda::fcm(my_dfm, 
+                        tri = FALSE,  # tri = TRUE only returns the upper part of the matrix
+                        count="boolean" # counts yes or no for co-occurrence, not # times within one article
+                        )
+
+
+my_fcm <- as.matrix(my_fcm)
+
+
+# but the fcm counts feature co-occurrences with themselves, so the diagonal is non-zero
+# forcibly set the diagonal to zero
+for(i in 1:dim(my_fcm)[1]){
+  my_fcm[i,i] <- 0
+}
+
+
+
+```
+
+
+
+```{r Count studies involving intersection of marine and SES terms}
+
+# Simplify fcm to look at when SES terms co-occur with ocean terms
+nlp_search_terms$features <- gsub(" ", "_", nlp_search_terms$Term)
+marineSESCounts <- my_fcm[nlp_search_terms$features[nlp_search_terms$Group == "marine"], nlp_search_terms$features[nlp_search_terms$Group == "SES"]]
+
+
+knitr::kable(marineSESCounts, caption = "Documents with terms matching for marine SES")
+
+```
+
+
+
+
+
+
+
+
