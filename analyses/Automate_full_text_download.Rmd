@@ -1,0 +1,221 @@
+---
+title: "Automate_full_text_download"
+author: "Devi Veytia"
+date: "2023-08-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r set up libraries}
+## Load libraries
+library(dplyr)
+library(dbplyr)
+library(R.utils)
+library(RSQLite)
+library(reticulate)
+library(ggplot2)
+
+# set up functions
+sourceFn <- dir(here::here("R"))
+for(i in 1:length(sourceFn)){
+  source(here::here("R", sourceFn[i]))
+}
+
+```
+
+
+
+
+# Automatic full text extraction
+
+
+```{r extract full text automatically from scihub}
+# set scihub url to renviron 
+#usethis::edit_r_environ() 
+# opens .Renviron file where I add teh line of text: SCIHUB_URL = "https://sci-hub.se/" # try www.sci-hub.st
+
+# Read in relevant articles
+relevantArticles <- readxl::read_excel(
+  here::here("data/raw-data/Abstract_title_screening_selection_Outcome_2_true_18.06.2025.xlsx"),
+  sheet = 'Articles'
+)
+colnames(relevantArticles) <- tolower(colnames(relevantArticles))
+
+
+# clean dois 
+dois <- relevantArticles$doi
+dois <- ifelse(is.na(dois), NA, gsub("https://doi.org/", "", dois))
+dois <- dois[!is.na(dois)]
+
+
+# set directory to place downloaded pdfs
+path_pdf = here::here("data/raw-data/full-texts")
+if(isFALSE(dir.exists(path_pdf))){
+  dir.create(path_pdf, showWarnings = FALSE, recursive = TRUE)
+}
+
+source(here::here("R/my_get_pdf.R"))
+
+## Create a dataframe of the ids, and whether or not a pdf was found
+doisFound <- tryCatch(
+  {doisFound <- read.csv(here::here("data/raw-data/full-texts/results-full-text-retreival.csv"))
+  return(doisFound)
+  },
+  error = function(e){
+    doisFound <- data.frame(doi = dois,searched = logical(length(dois)),fullTextFound = logical(length(dois)))
+    return(doisFound)
+    }
+)
+
+dois_search = doisFound$doi[!doisFound$searched]
+
+# download pdf if possible
+for (i in 1:length(dois_search)){ 
+  inIds = which(relevantArticles$doi == dois_search[i])
+  outIdx = which(doisFound$doi == dois_search[i])
+  
+  # make filename
+  id = relevantArticles$`article id`[inIds]
+  auth = clean_text(substring(relevantArticles$authors[inIds],1,10))
+  tit = clean_text(substring(relevantArticles$title[inIds], 1, 30))
+  yr = relevantArticles$year[inIds]
+  fn = paste(id, auth, tit, yr, sep="_")
+  
+
+  
+  errorMessage = capture.output(my_get_pdf(doi=dois_search[i], path = path_pdf, filename = fn, overwrite=TRUE),
+                                type = "message")
+  if(grepl("No PDF found", errorMessage)){
+    doisFound$fullTextFound[outIdx] <- FALSE
+  }else{
+    doisFound$fullTextFound[outIdx] <- TRUE
+  }
+  doisFound$searched[outIdx] <- TRUE
+  Sys.sleep(sample(seq(0, 5, by = 0.01), 1))
+  
+}
+
+
+## Write results of full text retreival
+write.csv(doisFound, file=here::here("data/raw-data/full-texts/results-full-text-retreival.csv"))
+```
+
+
+For the articles that can't be extracted on sci-hub, maybe can do a WOS search like below:
+
+```{r write dois to extract full texts from WOS}
+# write dois to extract full texts
+dois <- relevantArticles$doi[!is.na(relevantArticles$doi)]
+length(dois) # 11256
+nrow(relevantArticles) # 12898
+nrow(relevantArticles)-length(dois) # 1642 missing dois 
+
+cat(paste0(dois, collapse=" OR "), file = here::here("data/raw-data/dois_for_full_text_retreival.txt"))
+```
+
+
+# Pdf text keyword search
+
+```{r}
+library(pdftools)
+
+pdfs <- list.files(here::here("data/raw-data/full-texts/"), pattern = "pdf$")
+
+
+
+# function to remove reference pages and keyword match
+source(here::here("R/bool_detect.R")) # requirement
+
+read_pdf <- function(pdf_path, query){
+  tryCatch({ # Set up try catch
+    # Read in pdf text
+    txt <- pdftools::pdf_text(pdf_path)
+    # remove all the text after the references and combine into one
+    refStart <- grep("\nReferences\n", txt, ignore.case=TRUE) # page where references start
+    if(length(refStart) > 1){
+      refStart <- min(refStart) # if more than one match pick the earliest
+    }
+    if(length(refStart) == 1){
+      txt[refStart] <- gsub("\nReferences\n.*","", txt[refStart]) # remove all text from references onwards
+      txt <- paste(txt[1:refStart], collapse=" ")
+    }else{
+      txt <- paste(txt, collapse=" ")
+    }
+    # Search for keywords
+    match <- bool_detect2(txt, query)
+    return(match)
+  }, error = function(e){
+    
+    # If an error occurs, return NA
+    return(NA) 
+  })
+}
+
+
+# Calculate vector of whether a keyword match was found in the text
+matches <- sapply(pdfs, FUN = function(x){read_pdf(pdf_path = here::here("data/raw-data/full-texts",x),
+                                                   query = "climat* AND change")})
+
+```
+
+
+# Exploration
+
+
+```{r go back to basics with rvest and curl}
+library(tidyverse)
+library(here)
+library(rvest)
+library(purrr)
+library(rJava)
+
+
+
+
+page <- read_html("https://sci-hub.se/10.1080/08098131.2018.1490919")
+
+# name and create our download destination folder
+pdf_dir <- here::here("data/raw-data/full-texts")
+
+elements <- page %>%
+  html_elements(xpath = "//*[@id='buttons']") %>%
+  html_children()
+
+
+rvest::read_html("https://sci-hub.se/10.1080/08098131.2018.1490919") |> 
+      rvest::html_elements("button") |> 
+      rvest::html_attr("onclick")
+
+# searching for fit following button link: "location.href='/tree/66/8e/668e03ae008132d42d371de05b207a15.pdf?download=true'"
+download_link <- regmatches(elements, gregexpr("location.href[^;]+download=true", elements))
+
+# transform it into the following format: 'https://sci-hub.se/tree/66/8e/668e03ae008132d42d371de05b207a15.pdf?download=true'
+download_link <- unlist(download_link)
+download_link <- download_link[1]
+download_link <- gsub("location.href='","",download_link)
+download_link <- ifelse(startsWith(download_link,"/"), sub(".", "", download_link), download_link)
+download_link <- paste0("https://sci-hub.se/",download_link)
+
+# Use this to download
+curl::curl_download(download_link,here::here("data/raw-data/full-texts/download2.pdf"))
+
+errorMessage <- try(curl::curl_download("https://sci-hub.se/downloads/2022-11-08/35/demarco2021.pdf?download=true",here::here("data/raw-data/full-texts/download3.pdf")), silent = TRUE)
+
+errorMessage <- try(curl::curl_download(download_link,here::here("data/raw-data/full-texts/download2.pdf")),
+                    silent = TRUE)
+
+if(grepl("error", errorMessage, ignore.case = TRUE)){
+  next
+}
+
+curl::curl_download('https://sci-hub.se/tree/66/8e/668e03ae008132d42d371de05b207a15.pdf?download=true',
+                    here::here("data/raw-data/full-texts/download2.pdf"))
+```
+
+
+
+

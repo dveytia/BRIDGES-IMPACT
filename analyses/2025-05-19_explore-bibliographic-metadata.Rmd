@@ -37,6 +37,99 @@ Key questions:
 
 
 
+```{r read in original references}
+refs <- revtools::read_bibliography(
+  here::here("data/raw-data/SearchString_7_WoS_1000_24042025.ris")
+)
+
+refs <- revtools::read_bibliography(
+  here::here("data/raw-data/SearchString_7_Scopus_24042025.ris")
+)
+
+colnames(refs)
+
+library(mlaibr)
+
+filePath = here::here("data/raw-data/SearchString_7_Scopus_24042025.ris")
+
+scopusrefs = read_ris(filePath, fields=NULL)
+scopusrefs = spread_ris(scopusrefs)
+
+writexl::write_xlsx(scopusrefs,
+                    here::here("data/derived-data/scopusRefs_24042025.xlsx"))
+
+
+# for wos
+wosFields <- readxl::read_excel(here::here("data/derived-data/wosFieldTags.xlsx"))
+wosFields$field
+
+subsetFields <- c("PT","AU")
+
+filePath = here::here("data/raw-data/SearchString_7_WoS_1000_24042025.ris")
+filePath = here::here("data/raw-data/SearchString_7_WoS_2000_24042025.ris")
+refs = read_ris(filePath, fields=NULL)
+refs = spread_ris(refs)
+
+refs %>% head()
+
+library(bibliometrix)
+
+refs = bibliometrix::convert2df(filePath)
+
+```
+
+
+```{r get unique wos dois}
+functionsToSource <- dir(here::here("R"))
+for(i in 1:length(functionsToSource)){
+  source(here::here("R", functionsToSource[i]))
+}
+
+refs = revtools::read_bibliography(
+  here::here("data/raw-data/SearchString_7_without duplicates_24042025.ris")
+)
+
+scopusdois = scopusrefs$DO
+missingdois = refs$doi[!(refs$doi %in% scopusdois)]
+
+# write all dois to search
+# you can paste up to 5000 directly into the search string without a boolean operator
+# https://support.clarivate.com/ScientificandAcademicResearch/s/article/Web-of-Science-Digital-Object-Identifier-DOI-search?language=en_US
+writeLines(
+  paste(missingdois, collapse=" "), 
+  here::here("data/derived-data/missingWosDois.txt"))
+
+
+
+
+sopustitles = data.frame(
+  title=tolower(clean_string(scopusrefs$TI))
+)
+uniquetitles = data.frame(
+  title = tolower(clean_string(refs$title)),
+  doi = refs$doi
+)
+
+missingTitles = uniquetitles %>%
+  filter(is.na(doi)) %>%
+  fuzzyjoin::stringdist_left_join(
+    sopustitles,
+    by = c("title" = "title"),
+    max_dist = 15, method = "osa", ignore_case=TRUE, distance_col = "stringDist"
+  )
+missingTitles = missingTitles[is.na(missingTitles$title.y),]
+nrow(missingTitles) # 60 missing titles
+
+## Write dois and missing titles to a wos query
+
+missingTitleString = paste(c('"',
+                             paste(missingTitles$title.x[1:3], collapse = '" OR "'),
+                             '"'), collapse = "")
+
+writeLines(missingTitleString, here::here("data/derived-data/missingWosTitles.txt"))
+
+```
+
 
 ```{r read in deduplicated references, eval = FALSE}
 # Import the bibliographic metadata
